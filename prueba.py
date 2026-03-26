@@ -1,1 +1,1 @@
-print("ola esto es una prueba de python.")
+print("ola esto es una prueba de hey.")

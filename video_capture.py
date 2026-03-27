@@ -40,7 +40,8 @@ class VideoCaptureConfig:
     bitrate: str = "2500k"
     
     # Preset de calidad (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow)
-    preset: str = "fast"
+    # Para Windows con DirectShow, usar ultrafast o superfast para evitar saturación del buffer
+    preset: str = "ultrafast"
     
     # Nivel de compresión H.264 (0-51, menor = mejor calidad, mayor compresión)
     crf: int = 28
@@ -81,6 +82,94 @@ class WebcamVideoCapture:
         self._frame_count = 0
         self._error_count = 0
         self._max_consecutive_errors = 10
+        self._stderr_buffer = []
+        self._stderr_thread: Optional[threading.Thread] = None
+        
+    def _capture_stderr(self) -> None:
+        """
+        Thread para capturar y loguear stderr de FFmpeg en tiempo real.
+        """
+        if not self.process or not self.process.stderr:
+            return
+        
+        try:
+            for line in iter(self.process.stderr.readline, b''):
+                if line:
+                    decoded_line = line.decode('utf-8', errors='replace').strip()
+                    if decoded_line:
+                        self._stderr_buffer.append(decoded_line)
+                        logger.debug(f"FFmpeg stderr: {decoded_line}")
+                        # Imprimir los primeros 50 caracteres para diagnosticar
+                        if "error" in decoded_line.lower() or "fail" in decoded_line.lower():
+                            logger.error(f"FFmpeg error: {decoded_line}")
+        except Exception as e:
+            logger.debug(f"Error capturando stderr: {e}")
+    
+    def _get_last_stderr_errors(self, n: int = 20) -> str:
+        """Retorna los últimos N errores capturados de stderr."""
+        return "\n".join(self._stderr_buffer[-n:]) if self._stderr_buffer else "No stderr available"
+    
+    def _list_dshow_devices(self) -> list[tuple[str, str]]:
+        """
+        Lista los dispositivos de video disponibles en Windows usando DirectShow.
+        
+        Returns:
+            list: Lista de tuplas (device_name, alternative_name, device_type) de dispositivos disponibles.
+        """
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                encoding='utf-8',
+                errors='replace'
+            )
+            output = result.stderr
+            devices = []
+            current_name = None
+            current_alt = None
+            
+            for line in output.split('\n'):
+                # Buscar líneas con dispositivos
+                if '(video)' in line and '"' in line:
+                    try:
+                        start = line.find('"')
+                        end = line.find('"', start + 1)
+                        if start != -1 and end != -1:
+                            current_name = line[start+1:end]
+                            logger.info(f"Dispositivo encontrado: {current_name}")
+                    except:
+                        pass
+                # Buscar el nombre alternativo (PNP ID)
+                elif 'Alternative name "@device' in line and current_name:
+                    try:
+                        start = line.find('"')
+                        end = line.find('"', start + 1)
+                        if start != -1 and end != -1:
+                            alt_name = line[start+1:end]
+                            devices.append((current_name, alt_name))
+                            logger.debug(f"Nombre alternativo: {alt_name}")
+                            current_name = None
+                    except:
+                        pass
+                        
+            return devices
+        except Exception as e:
+            logger.warning(f"Error listando dispositivos DirectShow: {e}")
+            return []
+    
+    def _get_input_device(self) -> tuple[str, str]:
+        """
+        Detecta e retorna el dispositivo de entrada compatible con el SO.
+        
+        Returns:
+            tuple: (device_name, input_format)
+                - Windows: ("0", "dshow") o Integrated Camera si es disponible
+                - macOS: ("0", "avfoundation")
+                - Linux: ("/dev/video0", "v4l2")
+        """
+        system = platform.system()
         
     def _get_input_device(self) -> tuple[str, str]:
         """
@@ -88,7 +177,7 @@ class WebcamVideoCapture:
         
         Returns:
             tuple: (device_name, input_format)
-                - Windows: ("video=\"Nombre de cámara\"", "dshow")
+                - Windows: (PNP_ID o nombre_amigable, "dshow")
                 - macOS: ("0", "avfoundation")
                 - Linux: ("/dev/video0", "v4l2")
         """
@@ -96,8 +185,19 @@ class WebcamVideoCapture:
         
         if system == "Windows":
             # En Windows usamos DirectShow (dshow)
-            # Por defecto, "video=0" apunta a la primera cámara
-            return "video=\"0\"", "dshow"
+            # Detecta automáticamente el primer dispositivo de video disponible
+            devices = self._list_dshow_devices()
+            if devices:
+                device_name, alt_name = devices[0]
+                # Usar el nombre alternativo (PNP ID) que DirectShow reconoce mejor
+                # Importante: No duplicar backslashes aquí, los caracteres ya están correctos del stderr
+                logger.info(f"Usando dispositivo: {device_name}")
+                # Returnar el formato correcto para dshow con el ID alternativo
+                # El alt_name ya contiene los backslashes correctamente desde el stderr
+                return f'video={alt_name}', "dshow"
+            else:
+                logger.warning("No se encontraron dispositivos...")
+                return 'video="0"', "dshow"
         
         elif system == "Darwin":
             # En macOS usamos AVFoundation
@@ -140,21 +240,44 @@ class WebcamVideoCapture:
             "ffmpeg",
             # Suprime la entrada interactiva (promt de sobreescritura)
             "-hide_banner",
-            "-loglevel", "warning",
+            "-loglevel", "error",  # Solo mostrar errores
             "-y",  # Sobrescribe archivos sin preguntar
             
-            # Parámetros de entrada
-            "-f", input_format,  # Formato de entrada
-            "-framerate", str(self.config.fps),  # FPS de entrada
+            # Buffer aumentado para evitar que se sature en tiempo real
+            "-rtbufsize", "64M",  # Aumenta el buffer de tiempo real
         ]
         
-        # Agregar video_size solo si es necesario (en Linux y macOS puede causar problemas)
-        if platform.system() in ["Windows", "Linux"]:
-            cmd.extend(["-video_size", f"{self.config.width}x{self.config.height}"])
-        
-        cmd.extend([
-            "-i", device,  # Dispositivo de entrada
+        # Parámetros de entrada - el orden importa en DirectShow
+        # Para DirectShow, -f debe venir antes de otros parámetros de entrada
+        if input_format == "dshow":
+            # Configuración específica para DirectShow (Windows)
+            cmd.extend([
+                "-f", input_format,
+                "-framerate", str(self.config.fps),
+                "-video_size", f"{self.config.width}x{self.config.height}",
+                "-i", device,
+            ])
+        elif input_format == "gdigrab":
+            # Configuración para gdigrab (captura de pantalla como fallback)
+            cmd.extend([
+                "-f", input_format,
+                "-framerate", str(self.config.fps),
+                "-i", device,
+            ])
+        else:
+            # Configuración para otros formatos (macOS, Linux)
+            cmd.extend([
+                "-f", input_format,
+                "-framerate", str(self.config.fps),
+            ])
             
+            if input_format != "v4l2":
+                cmd.extend(["-video_size", f"{self.config.width}x{self.config.height}"])
+            
+            cmd.extend(["-i", device])
+            
+        # Resto de parámetros comunes para todos los formatos
+        cmd.extend([
             # Filtros de video: redimensionar si es necesario
             "-vf", f"scale={self.config.width}:{self.config.height}",
             
@@ -200,6 +323,10 @@ class WebcamVideoCapture:
                 stderr=subprocess.PIPE,
                 bufsize=0  # Sin buffer para obtener datos en tiempo real
             )
+            
+            # Iniciar thread para capturar stderr
+            self._stderr_thread = threading.Thread(target=self._capture_stderr, daemon=True)
+            self._stderr_thread.start()
             
             self.is_running = True
             self._frame_count = 0
@@ -255,6 +382,10 @@ class WebcamVideoCapture:
                         logger.warning(
                             f"FFmpeg retornó EOF. Errores consecutivos: {self._error_count}"
                         )
+                        
+                        if self._error_count == 1:  # Primera vez que ocurre EOF
+                            logger.warning("Errores de FFmpeg detectados:")
+                            logger.warning(self._get_last_stderr_errors())
                         
                         if self._error_count >= self._max_consecutive_errors:
                             logger.error("Demasiados errores consecutivos. Deteniendo captura.")

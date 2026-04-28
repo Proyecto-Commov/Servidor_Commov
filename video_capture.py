@@ -29,22 +29,23 @@ logger = logging.getLogger(__name__)
 class VideoCaptureConfig:
     """Configuración para la captura de video."""
     
-    # Resolución
-    width: int = 1280
-    height: int = 720
+    # Resolución - Más pequeña para evitar problemas de scaling
+    width: int = 480
+    height: int = 360
     
     # Framerate
     fps: int = 30
     
-    # Bitrate (en kbps)
-    bitrate: str = "2500k"
+    # Bitrate - Aumentado agresivamente para mayor fidelidad y menos artefactos
+    bitrate: str = "8000k"
     
     # Preset de calidad (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow)
     # Para Windows con DirectShow, usar ultrafast o superfast para evitar saturación del buffer
     preset: str = "ultrafast"
     
     # Nivel de compresión H.264 (0-51, menor = mejor calidad, mayor compresión)
-    crf: int = 28
+    # CRF 18 para mucha mejor calidad (sin pixelación)
+    crf: int = 18
     
     # Timeout para lectura de datos (segundos)
     read_timeout: float = 5.0
@@ -165,19 +166,7 @@ class WebcamVideoCapture:
         
         Returns:
             tuple: (device_name, input_format)
-                - Windows: ("0", "dshow") o Integrated Camera si es disponible
-                - macOS: ("0", "avfoundation")
-                - Linux: ("/dev/video0", "v4l2")
-        """
-        system = platform.system()
-        
-    def _get_input_device(self) -> tuple[str, str]:
-        """
-        Detecta e retorna el dispositivo de entrada compatible con el SO.
-        
-        Returns:
-            tuple: (device_name, input_format)
-                - Windows: (PNP_ID o nombre_amigable, "dshow")
+                - Windows: (nombre_amigable, "dshow")
                 - macOS: ("0", "avfoundation")
                 - Linux: ("/dev/video0", "v4l2")
         """
@@ -185,19 +174,9 @@ class WebcamVideoCapture:
         
         if system == "Windows":
             # En Windows usamos DirectShow (dshow)
-            # Detecta automáticamente el primer dispositivo de video disponible
-            devices = self._list_dshow_devices()
-            if devices:
-                device_name, alt_name = devices[0]
-                # Usar el nombre alternativo (PNP ID) que DirectShow reconoce mejor
-                # Importante: No duplicar backslashes aquí, los caracteres ya están correctos del stderr
-                logger.info(f"Usando dispositivo: {device_name}")
-                # Returnar el formato correcto para dshow con el ID alternativo
-                # El alt_name ya contiene los backslashes correctamente desde el stderr
-                return f'video={alt_name}', "dshow"
-            else:
-                logger.warning("No se encontraron dispositivos...")
-                return 'video="0"', "dshow"
+            # El formato es: video=Nombre (sin comillas extras)
+            logger.info("Windows: Usando dispositivo Integrated Camera")
+            return "video=Integrated Camera", "dshow"
         
         elif system == "Darwin":
             # En macOS usamos AVFoundation
@@ -244,18 +223,18 @@ class WebcamVideoCapture:
             "-y",  # Sobrescribe archivos sin preguntar
             
             # Buffer aumentado para evitar que se sature en tiempo real
-            "-rtbufsize", "64M",  # Aumenta el buffer de tiempo real
+            # Importante para DirectShow que puede tener picos de datos
+            "-rtbufsize", "256M",  # Aumentado significativamente (de 64M a 256M)
         ]
         
         # Parámetros de entrada - el orden importa en DirectShow
         # Para DirectShow, -f debe venir antes de otros parámetros de entrada
         if input_format == "dshow":
             # Configuración específica para DirectShow (Windows)
+            # NO usar -framerate con DirectShow (algunos drivers no lo soportan)
             cmd.extend([
                 "-f", input_format,
-                "-framerate", str(self.config.fps),
-                "-video_size", f"{self.config.width}x{self.config.height}",
-                "-i", device,
+                "-i", device,  # device ya incluye 'video=...' (sin comillas extra)
             ])
         elif input_format == "gdigrab":
             # Configuración para gdigrab (captura de pantalla como fallback)
@@ -278,23 +257,29 @@ class WebcamVideoCapture:
             
         # Resto de parámetros comunes para todos los formatos
         cmd.extend([
-            # Filtros de video: redimensionar si es necesario
-            "-vf", f"scale={self.config.width}:{self.config.height}",
+            # Filtros de video: deinterlace + redimensionar con mejor calidad (lanczos scaling)
+            "-vf", f"yadif=0:-1:0,scale={self.config.width}:{self.config.height}:flags=lanczos",
             
-            # Codificación H.264
+            # Codificación H.264 con parámetros optimizados para streaming
             "-c:v", "libx264",  # Códec de video
-            "-preset", self.config.preset,  # Velocidad/calidad
-            "-crf", str(self.config.crf),  # Calidad (0-51)
+            "-preset", self.config.preset,  # Velocidad/calidad (ultrafast para responsividad)
+            "-crf", str(self.config.crf),  # Calidad (0-51, más bajo = mejor)
             
-            # Bitrate
-            "-b:v", self.config.bitrate,  # Bitrate máximo
-            "-maxrate", self.config.bitrate,
-            "-bufsize", self.config.bitrate,
+            # Bitrate - Strict control para streaming consistente
+            "-b:v", self.config.bitrate,  # Bitrate objetivo
+            "-maxrate", self.config.bitrate,  # Bitrate máximo
+            "-bufsize", self.config.bitrate,  # Tamaño del buffer
             
-            # Formato de píxeles (compatibilidad)
+            # Opciones de H.264 avanzadas para mejor compresión y streaming
+            "-x264opts", "aq-mode=2:aq-strength=0.8",  # Adaptive quantization para mejor distribución de bits
+            
+            # Keyframe (I-frame) cada 2 segundos = 60 frames a 30fps
+            "-g", str(self.config.fps * 2),
+            
+            # Formato de píxeles (compatibilidad máxima)
             "-pix_fmt", "yuv420p",
             
-            # Salida en bitstream H.264 puro a stdout
+            # Salida en bitstream H.264 puro a stdout (sin timestamps)
             "-f", "h264",
             "pipe:1"  # stdout en formato binario
         ])

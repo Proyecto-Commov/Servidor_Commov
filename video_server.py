@@ -145,6 +145,7 @@ def build_ffmpeg_command(encoder: str) -> list[str]:
         "-fflags", "nobuffer",
         "-flags", "low_delay",
         "-max_delay", "0",
+        "-input_format", "mjpeg",  # Force MJPEG input from USB camera
         "-i", VIDEO_DEVICE,
         "-c:v", encoder,
         "-b:v", VIDEO_BITRATE,

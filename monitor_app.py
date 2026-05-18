@@ -18,6 +18,7 @@ import socket
 import json
 import logging
 import sys
+import subprocess
 import threading
 from collections import deque
 from pathlib import Path
@@ -95,8 +96,7 @@ class VideoWorker(QObject):
     Worker que corre en QThread separado.
     
     Responsabilidad:
-    - Conectar al servidor TCP de vídeo (Proceso 1)
-    - Leer bytes del stream MPEG-TS
+    - Capturar vídeo de webcam usando FFmpeg directamente
     - Decodificar con PyAV (av.open + container.decode)
     - Convertir VideoFrame → numpy array RGB → QImage
     - Emitir frames via pyqtSignal
@@ -113,12 +113,13 @@ class VideoWorker(QObject):
         super().__init__()
         self._stop_event = threading.Event()
         self.is_connected = False
+        self._ffmpeg_proc = None
     
     def run(self):
         """Bucle principal del worker."""
         while not self._stop_event.is_set():
             try:
-                self._connect_and_stream()
+                self._capture_and_stream()
             except Exception as e:
                 logger.error(f"Error en VideoWorker: {e}")
                 self.is_connected = False
@@ -131,6 +132,127 @@ class VideoWorker(QObject):
             # Intentar reconectar
             logger.info(f"Reconectando vídeo en {VIDEO_RECONNECT_DELAY}s...")
             self._stop_event.wait(VIDEO_RECONNECT_DELAY)
+    
+    def _capture_and_stream(self):
+        """Captura vídeo de webcam con FFmpeg y procesa el stream."""
+        # Comando FFmpeg para capturar de /dev/video2 y codificar a MPEG-TS
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-max_delay", "0",
+            "-input_format", "mjpeg",
+            "-i", "/dev/video2",
+            "-c:v", "libx264",  # Use CPU encoding for reliability
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-b:v", "2000k",
+            "-r", "30",
+            "-f", "mpegts",
+            "pipe:1",
+        ]
+        
+        try:
+            logger.info("Iniciando captura de vídeo con FFmpeg...")
+            self._ffmpeg_proc = subprocess.Popen(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+            logger.info(f"Proceso FFmpeg iniciado (PID: {self._ffmpeg_proc.pid})")
+            
+            self.is_connected = True
+            self.connection_status.emit(True)
+            logger.info("Conectado a webcam ✓")
+            
+            # Abrir stream desde FFmpeg stdout
+            try:
+                container = av.open(
+                    self._ffmpeg_proc.stdout,
+                    format="mpegts",
+                    options={
+                        "rtbufsize": "10485760",
+                        "max_delay": "0",
+                        "probesize": "1024000",
+                    },
+                )
+                logger.info(f"Contenedor abierto: {len(container.streams)} streams")
+                
+                # Verificar que hay stream de vídeo
+                if not container.streams.video:
+                    logger.error("No hay streams de vídeo en el contenedor")
+                    return
+                
+                logger.info(f"Stream de vídeo: {container.streams.video[0]}")
+                
+                # Decodificar stream
+                frame_count = 0
+                for frame in container.decode(video=0):
+                    if self._stop_event.is_set():
+                        break
+                    
+                    frame_count += 1
+                    if frame_count % 30 == 0:
+                        logger.debug(f"Frame {frame_count} decodificado: {frame.width}x{frame.height}")
+                    
+                    try:
+                        # Convertir a numpy array RGB
+                        np_frame = frame.to_ndarray(format="rgb24")
+                        
+                        # Convertir numpy array a QImage
+                        height, width, _ = np_frame.shape
+                        bytes_per_line = 3 * width
+                        q_image = QImage(
+                            np_frame.tobytes(),
+                            width,
+                            height,
+                            bytes_per_line,
+                            QImage.Format.Format_RGB888,
+                        )
+                        
+                        # IMPORTANTE: copiar la QImage para evitar corrupción de memoria
+                        q_image = q_image.copy()
+                        self.frame_ready.emit(q_image)
+                    except Exception as e:
+                        logger.warning(f"Error convirtiendo frame {frame_count}: {e}")
+                        continue
+                
+                logger.info(f"Stream terminado después de {frame_count} frames")
+                
+            except Exception as e:
+                logger.error(f"Error abriendo contenedor: {e}", exc_info=True)
+                raise
+        
+        except Exception as e:
+            logger.error(f"Error capturando vídeo: {e}", exc_info=True)
+        finally:
+            self.is_connected = False
+            self.connection_status.emit(False)
+            if self._ffmpeg_proc:
+                try:
+                    self._ffmpeg_proc.terminate()
+                    self._ffmpeg_proc.wait(timeout=2)
+                except:
+                    try:
+                        self._ffmpeg_proc.kill()
+                    except:
+                        pass
+    
+    def stop(self):
+        """Detener el worker."""
+        self._stop_event.set()
+        if self._ffmpeg_proc:
+            try:
+                self._ffmpeg_proc.terminate()
+                self._ffmpeg_proc.wait(timeout=2)
+            except:
+                try:
+                    self._ffmpeg_proc.kill()
+                except:
+                    pass
     
     def _connect_and_stream(self):
         """Conecta al servidor de vídeo y procesa el stream."""

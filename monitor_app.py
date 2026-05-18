@@ -551,9 +551,10 @@ class MonitorApp(QMainWindow):
         
         # Panel de vídeo
         self.video_label = QLabel()
-        self.video_label.setMinimumSize(VIDEO_DISPLAY_WIDTH, VIDEO_DISPLAY_HEIGHT)
+        self.video_label.setMinimumSize(400, 225)  # Mínimo responsive
         self.video_label.setStyleSheet("border: 2px solid #ccc; background-color: #222;")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setScaledContents(False)  # No escalar automáticamente
         self._update_no_signal_placeholder()
         left_panel.addWidget(QLabel("📹 Vídeo en Directo"), 0)
         left_panel.addWidget(self.video_label, 1)
@@ -616,11 +617,19 @@ class MonitorApp(QMainWindow):
     def _update_no_signal_placeholder(self):
         """Muestra placeholder de "sin señal" en el panel de vídeo."""
         pixmap = self._generate_no_signal_image()
+        # Usar tamaño actual del widget o fallback
+        label_size = self.video_label.size()
+        if label_size.width() > 0 and label_size.height() > 0:
+            display_width, display_height = label_size.width(), label_size.height()
+        else:
+            display_width, display_height = VIDEO_DISPLAY_WIDTH, VIDEO_DISPLAY_HEIGHT
+        
         self.video_label.setPixmap(
             pixmap.scaled(
-                VIDEO_DISPLAY_WIDTH,
-                VIDEO_DISPLAY_HEIGHT,
+                display_width,
+                display_height,
                 Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
             )
         )
     
@@ -641,11 +650,22 @@ class MonitorApp(QMainWindow):
     def _on_frame_ready(self, q_image: QImage):
         """Slot llamado cuando VideoWorker emite un frame."""
         pixmap = QPixmap.fromImage(q_image)
-        scaled_pixmap = pixmap.scaled(
-            VIDEO_DISPLAY_WIDTH,
-            VIDEO_DISPLAY_HEIGHT,
-            Qt.AspectRatioMode.KeepAspectRatio,
-        )
+        # Usar tamaño actual del widget para escalar dinámicamente
+        label_size = self.video_label.size()
+        if label_size.width() > 0 and label_size.height() > 0:
+            scaled_pixmap = pixmap.scaled(
+                label_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        else:
+            # Fallback si el widget aún no tiene tamaño
+            scaled_pixmap = pixmap.scaled(
+                VIDEO_DISPLAY_WIDTH,
+                VIDEO_DISPLAY_HEIGHT,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         self.video_label.setPixmap(scaled_pixmap)
     
     @pyqtSlot(bool)

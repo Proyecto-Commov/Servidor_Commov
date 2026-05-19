@@ -18,11 +18,13 @@ import socket
 import json
 import logging
 import sys
+import os
 import subprocess
 import threading
 from collections import deque
 from pathlib import Path
 from typing import Optional
+from datetime import datetime
 
 import numpy as np
 from PyQt6.QtWidgets import (
@@ -44,8 +46,10 @@ from PyQt6.QtCore import (
     pyqtSlot,
     QTimer,
     QSize,
+    QPointF,
 )
-from PyQt6.QtGui import QImage, QPixmap, QFont, QColor
+from PyQt6.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QLinearGradient, QBrush
+from PyQt6.QtCore import QPoint, QPointF
 from PyQt6.QtMultimedia import QMediaPlayer
 import pyqtgraph as pg
 import av
@@ -498,14 +502,39 @@ class MonitorApp(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Monitor de Temperatura en Tiempo Real — SERVIDOR_COMMOV")
-        self.setGeometry(100, 100, 1600, 900)
+        self.setWindowTitle("Monitor de Temperatura — Tiempo Real")
+        self.setGeometry(100, 100, 1920, 1080)
+        
+        # Tema oscuro
+        self.setStyleSheet("""
+            QMainWindow, QWidget {
+                background-color: #1a1a2e;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QPushButton {
+                background-color: #0f3460;
+                color: #00d4ff;
+                border: 1px solid #00d4ff;
+                padding: 5px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #16213e;
+            }
+        """)
         
         # Estado
         self.temp_history = deque(maxlen=TEMP_HISTORY_SIZE)
         self.current_temp = 0.0
         self.current_classification = "---"
         self.alert_shown = False
+        self.temp_max = -999
+        self.temp_min = 999
+        self.temp_sum = 0
+        self.temp_count = 0
         
         # Crear workers y threads
         self.video_worker = VideoWorker()
@@ -529,6 +558,11 @@ class MonitorApp(QMainWindow):
         # Crear UI
         self._create_ui()
         
+        # Timer para hora
+        self.time_timer = QTimer()
+        self.time_timer.timeout.connect(self._update_time)
+        self.time_timer.start(1000)
+        
         # Timer para animación de alerta (parpadeo)
         self.alert_timer = QTimer()
         self.alert_timer.timeout.connect(self._blink_alert)
@@ -539,80 +573,328 @@ class MonitorApp(QMainWindow):
         self.sensor_connected = False
     
     def _create_ui(self):
-        """Construye la interfaz gráfica."""
+        """Construye la interfaz gráfica con diseño limpio y moderno."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Layout principal (horizontal): [vídeo + temperatura] | [gráfico]
-        main_layout = QHBoxLayout(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(15, 10, 15, 15)
+        main_layout.setSpacing(10)
         
-        # Panel izquierdo: vídeo y temperatura
+        # ===== HEADER =====
+        header_layout = QHBoxLayout()
+        
+        # Título
+        title = QLabel("Monitor de Temperatura — Tiempo Real")
+        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        title.setStyleSheet("color: #00d4ff;")
+        header_layout.addWidget(title)
+        
+        # Separador
+        header_layout.addSpacing(30)
+        
+        # Estado EN DIRECTO
+        live_label = QLabel("● EN DIRECTO")
+        live_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        live_label.setStyleSheet("color: #ff0000;")
+        header_layout.addWidget(live_label)
+        
+        # Separador
+        header_layout.addSpacing(20)
+        
+        # Sensor OK / Cámara OK badges
+        self.sensor_badge = QLabel("● Sensor OK")
+        self.sensor_badge.setFont(QFont("Arial", 9))
+        self.sensor_badge.setStyleSheet("""
+            color: #ffffff;
+            background-color: #1a5f3f;
+            padding: 4px 8px;
+            border-radius: 12px;
+            border: 1px solid #00cc66;
+        """)
+        header_layout.addWidget(self.sensor_badge)
+        
+        header_layout.addSpacing(10)
+        
+        self.camera_badge = QLabel("● Cámara OK")
+        self.camera_badge.setFont(QFont("Arial", 9))
+        self.camera_badge.setStyleSheet("""
+            color: #ffffff;
+            background-color: #1a3f5f;
+            padding: 4px 8px;
+            border-radius: 12px;
+            border: 1px solid #0066cc;
+        """)
+        header_layout.addWidget(self.camera_badge)
+        
+        header_layout.addStretch()
+        
+        # Mostrar SERVIDOR_COMANOV
+        server_label = QLabel("SERVIDOR_COMANOV")
+        server_label.setFont(QFont("Arial", 9))
+        server_label.setStyleSheet("color: #888888;")
+        header_layout.addWidget(server_label)
+        
+        main_layout.addLayout(header_layout)
+        
+        # ===== CONTENIDO PRINCIPAL =====
+        content_layout = QHBoxLayout()
+        content_layout.setSpacing(15)
+        
+        # ===== PANEL IZQUIERDO: VIDEO =====
         left_panel = QVBoxLayout()
+        left_panel.setSpacing(10)
+        
+        # Indicador EN DIRECTO
+        left_header = QLabel("EN\nDIRECTO")
+        left_header.setFont(QFont("Arial", 24, QFont.Weight.Bold))
+        left_header.setStyleSheet("color: #ff0000;")
+        left_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left_panel.addWidget(left_header)
         
         # Panel de vídeo
         self.video_label = QLabel()
-        self.video_label.setMinimumSize(400, 225)  # Mínimo responsive
-        self.video_label.setStyleSheet("border: 2px solid #ccc; background-color: #222;")
+        self.video_label.setMinimumSize(500, 350)
+        self.video_label.setStyleSheet("""
+            border: 1px solid #333333;
+            background-color: #0f0f0f;
+            border-radius: 5px;
+        """)
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setScaledContents(False)  # No escalar automáticamente
+        self.video_label.setScaledContents(False)
         self._update_no_signal_placeholder()
-        left_panel.addWidget(QLabel("📹 Vídeo en Directo"), 0)
         left_panel.addWidget(self.video_label, 1)
         
-        # Panel de temperatura
-        temp_layout = QHBoxLayout()
-        self.temp_label = QLabel("Temperatura Actual:")
-        self.temp_value = QLabel("-- °C")
-        font = QFont()
-        font.setPointSize(24)
-        font.setBold(True)
-        self.temp_value.setFont(font)
-        self.temp_value.setStyleSheet(
-            "background-color: #f0f0f0; padding: 10px; border-radius: 5px;"
-        )
-        temp_layout.addWidget(self.temp_label)
-        temp_layout.addWidget(self.temp_value, 1)
-        left_panel.addLayout(temp_layout)
+        # Hora abajo del video
+        self.time_label = QLabel(datetime.now().strftime("%H:%M:%S"))
+        self.time_label.setFont(QFont("Courier", 18, QFont.Weight.Bold))
+        self.time_label.setStyleSheet("color: #00d4ff;")
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left_panel.addWidget(self.time_label)
         
-        # Panel de clasificación
-        class_layout = QHBoxLayout()
-        self.class_label = QLabel("Estado:")
-        self.class_value = QLabel("ESPERANDO")
-        font_class = QFont()
-        font_class.setPointSize(16)
-        font_class.setBold(True)
-        self.class_value.setFont(font_class)
-        self.class_value.setStyleSheet(
-            "background-color: #666; color: white; padding: 10px; border-radius: 5px;"
-        )
-        self.class_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        class_layout.addWidget(self.class_label)
-        class_layout.addWidget(self.class_value, 1)
-        left_panel.addLayout(class_layout)
+        content_layout.addLayout(left_panel, 2)
         
-        main_layout.addLayout(left_panel, 2)
-        
-        # Panel derecho: gráfico de temperatura
+        # ===== PANEL DERECHO: DATOS Y GRÁFICO =====
         right_panel = QVBoxLayout()
-        right_panel.addWidget(QLabel("📊 Historial de Temperatura"), 0)
+        right_panel.setSpacing(10)
         
+        # ===== SECCIÓN TEMPERATURA ACTUAL =====
+        temp_section = QVBoxLayout()
+        
+        temp_label = QLabel("TEMPERATURA ACTUAL")
+        temp_label.setFont(QFont("Arial", 10))
+        temp_label.setStyleSheet("color: #888888;")
+        temp_section.addWidget(temp_label)
+        
+        # Valor de temperatura grande
+        self.temp_value = QLabel("-- °C")
+        self.temp_value.setFont(QFont("Arial", 60, QFont.Weight.Bold))
+        self.temp_value.setStyleSheet("color: #ffffff;")
+        self.temp_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        temp_section.addWidget(self.temp_value)
+        
+        # Clasificación con badge
+        self.class_value = QLabel("ESPERANDO")
+        self.class_value.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        self.class_value.setStyleSheet("""
+            color: #ffffff;
+            background-color: #666666;
+            padding: 8px 16px;
+            border-radius: 16px;
+            border: 1px solid #00d4ff;
+        """)
+        self.class_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        temp_section.addWidget(self.class_value)
+        
+        right_panel.addLayout(temp_section)
+        
+        # ===== ESTADÍSTICAS =====
+        stats_group_layout = QVBoxLayout()
+        
+        # Grid 2x2 para MAX/MIN y PROMEDIO/VARIACIÓN
+        stats_grid = QVBoxLayout()
+        
+        # Fila 1: MAX y MIN
+        stats_row1 = QHBoxLayout()
+        
+        # MAX
+        max_box = QVBoxLayout()
+        max_label = QLabel("MAX. HOY")
+        max_label.setFont(QFont("Arial", 9))
+        max_label.setStyleSheet("color: #888888;")
+        max_box.addWidget(max_label)
+        
+        self.max_value = QLabel("-- °C")
+        self.max_value.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.max_value.setStyleSheet("color: #ff6644;")
+        max_box.addWidget(self.max_value)
+        
+        max_container = QWidget()
+        max_container.setLayout(max_box)
+        max_container.setStyleSheet("""
+            background-color: #252540;
+            border: 1px solid #333333;
+            border-radius: 5px;
+            padding: 8px;
+        """)
+        stats_row1.addWidget(max_container, 1)
+        
+        # MIN
+        min_box = QVBoxLayout()
+        min_label = QLabel("MIN. HOY")
+        min_label.setFont(QFont("Arial", 9))
+        min_label.setStyleSheet("color: #888888;")
+        min_box.addWidget(min_label)
+        
+        self.min_value = QLabel("-- °C")
+        self.min_value.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.min_value.setStyleSheet("color: #5588ff;")
+        min_box.addWidget(self.min_value)
+        
+        min_container = QWidget()
+        min_container.setLayout(min_box)
+        min_container.setStyleSheet("""
+            background-color: #252540;
+            border: 1px solid #333333;
+            border-radius: 5px;
+            padding: 8px;
+        """)
+        stats_row1.addWidget(min_container, 1)
+        
+        stats_grid.addLayout(stats_row1)
+        
+        # Fila 2: PROMEDIO y VARIACIÓN
+        stats_row2 = QHBoxLayout()
+        
+        # PROMEDIO
+        avg_box = QVBoxLayout()
+        avg_label = QLabel("PROMEDIO")
+        avg_label.setFont(QFont("Arial", 9))
+        avg_label.setStyleSheet("color: #888888;")
+        avg_box.addWidget(avg_label)
+        
+        self.avg_value = QLabel("-- °C")
+        self.avg_value.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.avg_value.setStyleSheet("color: #ffaa44;")
+        avg_box.addWidget(self.avg_value)
+        
+        avg_container = QWidget()
+        avg_container.setLayout(avg_box)
+        avg_container.setStyleSheet("""
+            background-color: #252540;
+            border: 1px solid #333333;
+            border-radius: 5px;
+            padding: 8px;
+        """)
+        stats_row2.addWidget(avg_container, 1)
+        
+        # VARIACIÓN
+        var_box = QVBoxLayout()
+        var_label = QLabel("VARIACIÓN")
+        var_label.setFont(QFont("Arial", 9))
+        var_label.setStyleSheet("color: #888888;")
+        var_box.addWidget(var_label)
+        
+        self.var_value = QLabel("-- °C")
+        self.var_value.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.var_value.setStyleSheet("color: #44ff88;")
+        var_box.addWidget(self.var_value)
+        
+        var_container = QWidget()
+        var_container.setLayout(var_box)
+        var_container.setStyleSheet("""
+            background-color: #252540;
+            border: 1px solid #333333;
+            border-radius: 5px;
+            padding: 8px;
+        """)
+        stats_row2.addWidget(var_container, 1)
+        
+        stats_grid.addLayout(stats_row2)
+        
+        stats_group_layout.addLayout(stats_grid)
+        right_panel.addLayout(stats_group_layout)
+        
+        # ===== GRÁFICO =====
+        graph_label = QLabel("HISTORIAL DE TEMPERATURA")
+        graph_label.setFont(QFont("Arial", 10))
+        graph_label.setStyleSheet("color: #888888;")
+        right_panel.addWidget(graph_label)
+        
+        # Gráfico con pyqtgraph
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setLabel("bottom", "Tiempo (muestras)")
-        self.plot_widget.setLabel("left", "Temperatura (°C)")
-        self.plot_widget.setTitle("Últimas 60 muestras")
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_widget.setLabel("bottom", "ÚLTIMAS 48 MUESTRAS", color="#888888")
+        self.plot_widget.setLabel("left", "°C", color="#888888")
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
+        self.plot_widget.setStyleSheet("""
+            QGraphicsView {
+                background-color: #0f0f0f;
+                border: 1px solid #333333;
+                border-radius: 5px;
+            }
+        """)
         
-        self.plot_curve = self.plot_widget.plot(pen=pg.mkPen("blue", width=2))
+        # Curve azul
+        self.plot_curve = self.plot_widget.plot(pen=pg.mkPen("#0088ff", width=2))
         right_panel.addWidget(self.plot_widget, 1)
         
-        main_layout.addLayout(right_panel, 1)
+        # ===== ESCALA TÉRMICA =====
+        scale_label = QLabel("ESCALA TÉRMICA")
+        scale_label.setFont(QFont("Arial", 9))
+        scale_label.setStyleSheet("color: #888888;")
+        right_panel.addWidget(scale_label)
         
-        # Barra de estado
-        self.statusBar().showMessage("Iniciando conexiones...")
-        self.status_video = QLabel("📹 Vídeo: Conectando...")
-        self.status_sensor = QLabel("🌡 Sensor: Conectando...")
-        self.statusBar().addPermanentWidget(self.status_video)
-        self.statusBar().addPermanentWidget(self.status_sensor)
+        # Barra de gradiente
+        self.thermal_bar = QLabel()
+        self.thermal_bar.setFixedHeight(15)
+        self.thermal_bar.setPixmap(self._create_thermal_scale())
+        right_panel.addWidget(self.thermal_bar)
+        
+        # Rango de temperatura
+        range_layout = QHBoxLayout()
+        range_layout.addWidget(QLabel("0 °C"), 0)
+        range_layout.addStretch()
+        range_layout.addWidget(QLabel("50 °C"), 0)
+        right_panel.addLayout(range_layout)
+        
+        content_layout.addLayout(right_panel, 1)
+        
+        main_layout.addLayout(content_layout, 1)
+        
+        # ===== FOOTER =====
+        footer_layout = QHBoxLayout()
+        
+        # Estado sensor
+        self.status_sensor = QLabel("● Sensor · Conectado")
+        self.status_sensor.setFont(QFont("Arial", 9))
+        self.status_sensor.setStyleSheet("color: #00cc66;")
+        footer_layout.addWidget(self.status_sensor)
+        
+        footer_layout.addSpacing(20)
+        
+        # Estado cámara
+        self.status_camera = QLabel("● Cámara · Conectada")
+        self.status_camera.setFont(QFont("Arial", 9))
+        self.status_camera.setStyleSheet("color: #0066cc;")
+        footer_layout.addWidget(self.status_camera)
+        
+        footer_layout.addStretch()
+        
+        # Actualización
+        self.update_label = QLabel("Actualiza cada 2 s")
+        self.update_label.setFont(QFont("Arial", 9))
+        self.update_label.setStyleSheet("color: #888888;")
+        footer_layout.addWidget(self.update_label)
+        
+        footer_layout.addSpacing(20)
+        
+        # Timestamp
+        self.timestamp_label = QLabel(datetime.now().strftime("%H:%M:%S · %a %d %b %Y"))
+        self.timestamp_label.setFont(QFont("Arial", 9))
+        self.timestamp_label.setStyleSheet("color: #888888;")
+        footer_layout.addWidget(self.timestamp_label)
+        
+        main_layout.addLayout(footer_layout)
     
     def _update_no_signal_placeholder(self):
         """Muestra placeholder de "sin señal" en el panel de vídeo."""
@@ -636,15 +918,49 @@ class MonitorApp(QMainWindow):
     @staticmethod
     def _generate_no_signal_image() -> QPixmap:
         """Genera imagen 'sin señal' programáticamente."""
-        pixmap = QPixmap(640, 480)
-        pixmap.fill(QColor(50, 50, 50))
-        
-        # Dibuja un rectángulo y texto
-        painter = pixmap.fill(QColor(50, 50, 50))
-        # Nota: QPixmap.fill() no retorna painter, usar otro método
-        # Por simplicidad, dejamos la imagen gris y retornamos
-        
+        pixmap = QPixmap(1280, 720)
+        pixmap.fill(QColor(15, 15, 15))
         return pixmap
+    
+    @staticmethod
+    def _create_thermal_scale() -> QPixmap:
+        """Crea barra de gradiente térmico con QLinearGradient."""
+        pixmap = QPixmap(1200, 20)
+        pixmap.fill(QColor(15, 15, 15))
+        
+        painter = QPainter(pixmap)
+        
+        # Crear gradiente lineal de azul a rojo
+        gradient = QLinearGradient(QPointF(0, 0), QPointF(1200, 0))
+        
+        # Agregar color stops para crear el gradiente suave
+        gradient.setColorAt(0.0, QColor(0, 0, 255))           # Azul
+        gradient.setColorAt(0.17, QColor(0, 255, 255))        # Cian
+        gradient.setColorAt(0.33, QColor(0, 255, 0))          # Verde
+        gradient.setColorAt(0.50, QColor(255, 255, 0))        # Amarillo
+        gradient.setColorAt(0.67, QColor(255, 165, 0))        # Naranja
+        gradient.setColorAt(0.83, QColor(255, 69, 0))         # Rojo-naranja
+        gradient.setColorAt(1.0, QColor(255, 0, 0))           # Rojo
+        
+        brush = QBrush(gradient)
+        painter.fillRect(0, 0, 1200, 20, brush)
+        
+        # Dibujar líneas de referencia
+        painter.setPen(QColor(200, 200, 200))
+        painter.setFont(QFont("Arial", 8))
+        
+        # Marcas cada 200 píxeles
+        for i in range(0, 1201, 200):
+            painter.drawLine(i, 0, i, 3)
+        
+        painter.end()
+        return pixmap
+    
+    def _update_time(self):
+        """Actualiza la hora mostrada."""
+        now = datetime.now()
+        self.time_label.setText(now.strftime("%H:%M:%S"))
+        self.timestamp_label.setText(now.strftime("%H:%M:%S · %a %d %b %Y"))
     
     @pyqtSlot(QImage)
     def _on_frame_ready(self, q_image: QImage):
@@ -673,11 +989,27 @@ class MonitorApp(QMainWindow):
         """Slot para cambios en estado de conexión de vídeo."""
         self.video_connected = connected
         if connected:
-            self.status_video.setText("📹 Vídeo: ✓ Conectado")
-            self.status_video.setStyleSheet("color: green;")
+            self.status_camera = QLabel("● Cámara · Conectada")
+            self.status_camera.setFont(QFont("Arial", 9))
+            self.status_camera.setStyleSheet("color: #0066cc;")
+            self.camera_badge.setStyleSheet("""
+                color: #ffffff;
+                background-color: #1a3f5f;
+                padding: 4px 8px;
+                border-radius: 12px;
+                border: 1px solid #00aa00;
+            """)
         else:
-            self.status_video.setText("📹 Vídeo: ✗ Desconectado")
-            self.status_video.setStyleSheet("color: red;")
+            self.status_camera = QLabel("● Cámara · Desconectada")
+            self.status_camera.setFont(QFont("Arial", 9))
+            self.status_camera.setStyleSheet("color: #ff0000;")
+            self.camera_badge.setStyleSheet("""
+                color: #ffffff;
+                background-color: #5f1a1a;
+                padding: 4px 8px;
+                border-radius: 12px;
+                border: 1px solid #ff0000;
+            """)
             self._update_no_signal_placeholder()
     
     @pyqtSlot(dict)
@@ -690,15 +1022,75 @@ class MonitorApp(QMainWindow):
             self.current_temp = temp
             self.current_classification = classification
             
-            # Actualizar etiqueta de temperatura
+            # Actualizar estadísticas
+            if temp > self.temp_max:
+                self.temp_max = temp
+            if temp < self.temp_min:
+                self.temp_min = temp
+            
+            self.temp_sum += temp
+            self.temp_count += 1
+            avg = self.temp_sum / self.temp_count if self.temp_count > 0 else 0
+            variation = max(0, self.temp_max - self.temp_min)
+            
+            # Actualizar valores mostrados
             self.temp_value.setText(f"{temp:.1f} °C")
+            self.max_value.setText(f"{self.temp_max:.1f}°C")
+            self.min_value.setText(f"{self.temp_min:.1f}°C")
+            self.avg_value.setText(f"{avg:.1f}°C")
+            self.var_value.setText(f"±{variation:.1f}°C")
             
             # Actualizar clasificación con color dinámico
-            color = CLASSIFICATION_COLORS.get(classification, "#666")
+            color_map = {
+                "frio": ("#5588ff", "#1a3f5f"),
+                "templado": "#5BAD6F",
+                "caliente": "#ff8800",
+                "muy caliente": "#ff6644",
+                "crítico": "#ff0000",
+            }
+            
             self.class_value.setText(classification.upper())
-            self.class_value.setStyleSheet(
-                f"background-color: {color}; color: white; padding: 10px; border-radius: 5px;"
-            )
+            
+            if classification == "frio":
+                self.class_value.setStyleSheet("""
+                    color: #ffffff;
+                    background-color: #1a3f5f;
+                    padding: 8px 16px;
+                    border-radius: 16px;
+                    border: 1px solid #0088ff;
+                """)
+            elif classification == "templado":
+                self.class_value.setStyleSheet("""
+                    color: #ffffff;
+                    background-color: #1f5f1f;
+                    padding: 8px 16px;
+                    border-radius: 16px;
+                    border: 1px solid #00cc66;
+                """)
+            elif classification == "caliente":
+                self.class_value.setStyleSheet("""
+                    color: #ffffff;
+                    background-color: #5f4a1a;
+                    padding: 8px 16px;
+                    border-radius: 16px;
+                    border: 1px solid #ff8800;
+                """)
+            elif classification == "muy caliente":
+                self.class_value.setStyleSheet("""
+                    color: #ffffff;
+                    background-color: #5f3a2a;
+                    padding: 8px 16px;
+                    border-radius: 16px;
+                    border: 1px solid #ff6644;
+                """)
+            elif classification == "crítico":
+                self.class_value.setStyleSheet("""
+                    color: #ffffff;
+                    background-color: #5f1a1a;
+                    padding: 8px 16px;
+                    border-radius: 16px;
+                    border: 1px solid #ff0000;
+                """)
             
             # Agregar al historial y actualizar gráfico
             self.temp_history.append(temp)
@@ -709,9 +1101,6 @@ class MonitorApp(QMainWindow):
                 self._trigger_alert()
             elif temp <= TEMP_ALERT_THRESHOLD:
                 self.alert_timer.stop()
-                self.temp_value.setStyleSheet(
-                    "background-color: #f0f0f0; padding: 10px; border-radius: 5px;"
-                )
                 self.alert_shown = False
         
         except Exception as e:
@@ -722,16 +1111,33 @@ class MonitorApp(QMainWindow):
         """Slot para cambios en estado de conexión del sensor."""
         self.sensor_connected = connected
         if connected:
-            self.status_sensor.setText("🌡 Sensor: ✓ Conectado")
-            self.status_sensor.setStyleSheet("color: green;")
+            self.status_sensor.setText("● Sensor · Conectado")
+            self.status_sensor.setStyleSheet("color: #00cc66;")
+            self.sensor_badge.setStyleSheet("""
+                color: #ffffff;
+                background-color: #1a5f3f;
+                padding: 4px 8px;
+                border-radius: 12px;
+                border: 1px solid #00cc66;
+            """)
         else:
-            self.status_sensor.setText("🌡 Sensor: ✗ Desconectado")
-            self.status_sensor.setStyleSheet("color: red;")
-            self.temp_value.setText("-- °C")
+            self.status_sensor.setText("● Sensor · Desconectado")
+            self.status_sensor.setStyleSheet("color: #ff0000;")
+            self.sensor_badge.setStyleSheet("""
+                color: #ffffff;
+                background-color: #5f3a2a;
+                padding: 4px 8px;
+                border-radius: 12px;
+                border: 1px solid #ff0000;
+            """)
             self.class_value.setText("ESPERANDO")
-            self.class_value.setStyleSheet(
-                "background-color: #666; color: white; padding: 10px; border-radius: 5px;"
-            )
+            self.class_value.setStyleSheet("""
+                color: #ffffff;
+                background-color: #404050;
+                padding: 8px 16px;
+                border-radius: 16px;
+                border: 1px solid #666666;
+            """)
     
     def _update_plot(self):
         """Actualiza el gráfico de temperatura con historial."""
@@ -750,23 +1156,84 @@ class MonitorApp(QMainWindow):
             )
             self.alert_shown = True
         
+        # Reproducir sonido de alerta
+        self._play_alert_sound()
+        
         # Emitir beep del sistema
         QApplication.beep()
         
         # Iniciar parpadeo
         self.alert_timer.start(500)  # Parpadeo cada 500ms
     
+    def _play_alert_sound(self):
+        """Reproduce un sonido de alerta."""
+        try:
+            # Intentar usar paplay (PulseAudio)
+            sound_files = [
+                "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga",
+                "/usr/share/sounds/freedesktop/stereo/complete.oga",
+                "/usr/share/sounds/freedesktop/stereo/dialog-error.oga",
+            ]
+            
+            # Buscar un archivo de sonido disponible
+            sound_file = None
+            for path in sound_files:
+                if os.path.exists(path):
+                    sound_file = path
+                    break
+            
+            if sound_file:
+                # Intentar reproducir con paplay
+                try:
+                    subprocess.Popen(
+                        ["paplay", sound_file],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except FileNotFoundError:
+                    # Si paplay no está disponible, intentar con aplay
+                    try:
+                        subprocess.Popen(
+                            ["aplay", sound_file],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except FileNotFoundError:
+                        logger.debug("No audio player found (paplay/aplay)")
+            else:
+                # Generar beep programático si no hay archivos de sonido
+                try:
+                    # Usar beep del sistema
+                    subprocess.Popen(
+                        ["beep", "-f", "1000", "-l", "200"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except FileNotFoundError:
+                    logger.debug("beep command not found")
+        
+        except Exception as e:
+            logger.debug(f"Error reproduciendo sonido de alerta: {e}")
+    
     def _blink_alert(self):
         """Anima el parpadeo de alerta."""
         self.alert_blink_state = not self.alert_blink_state
         if self.alert_blink_state:
-            self.temp_value.setStyleSheet(
-                "background-color: #ff0000; padding: 10px; border-radius: 5px;"
-            )
+            self.class_value.setStyleSheet("""
+                color: #000000;
+                background-color: #ff0000;
+                padding: 8px 16px;
+                border-radius: 16px;
+                border: 1px solid #ff0000;
+            """)
         else:
-            self.temp_value.setStyleSheet(
-                "background-color: #cc0000; padding: 10px; border-radius: 5px;"
-            )
+            self.class_value.setStyleSheet("""
+                color: #ffffff;
+                background-color: #5f1a1a;
+                padding: 8px 16px;
+                border-radius: 16px;
+                border: 1px solid #ff0000;
+            """)
     
     def closeEvent(self, event):
         """Maneja el cierre de la aplicación."""

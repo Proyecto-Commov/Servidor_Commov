@@ -1323,14 +1323,14 @@ class MonitorApp(QMainWindow):
                     break
             
             if sound_file:
-                # Intentar reproducir en loop con paplay
+                # Intentar reproducir en loop con paplay (bash wrapper para loop)
                 try:
                     self.sound_process = subprocess.Popen(
-                        ["paplay", sound_file],
+                        ["bash", "-c", f"while true; do paplay {sound_file}; done"],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
-                    logger.info(f"🔊 Sonido de alerta iniciado (paplay, PID: {self.sound_process.pid})")
+                    logger.info(f"🔊 Sonido de alerta iniciado (paplay loop, PID: {self.sound_process.pid})")
                     return
                 except FileNotFoundError:
                     pass
@@ -1338,11 +1338,11 @@ class MonitorApp(QMainWindow):
                 # Si paplay no está disponible, intentar con aplay (con loop)
                 try:
                     self.sound_process = subprocess.Popen(
-                        ["aplay", "-l", sound_file],  # -l para loop infinito
+                        ["bash", "-c", f"while true; do aplay {sound_file}; done"],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
-                    logger.info(f"🔊 Sonido de alerta iniciado (aplay -l, PID: {self.sound_process.pid})")
+                    logger.info(f"🔊 Sonido de alerta iniciado (aplay loop, PID: {self.sound_process.pid})")
                     return
                 except FileNotFoundError:
                     logger.debug("No audio player found (paplay/aplay)")

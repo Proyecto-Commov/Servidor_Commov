@@ -36,8 +36,8 @@ from typing import Generator
 SENSOR_BIND_HOST     = "0.0.0.0"        # Interfaz de escucha
 SENSOR_PORT          = 9001              # Puerto TCP del servidor
 SENSOR_INTERVAL      = 1.0               # Segundos entre emisiones de datos
-SENSOR_TEMP_BASE     = 20.0              # Temperatura base (°C)
-SENSOR_TEMP_NOISE    = 3.0               # Variación aleatoria (±)
+SENSOR_TEMP_BASE     = 65.0              # Temperatura base (°C) — aumentada para pruebas de alerta
+SENSOR_TEMP_NOISE    = 5.0               # Variación aleatoria (±)
 LOG_LEVEL            = "INFO"            # Nivel de log
 # =============================================================================
 

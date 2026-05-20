@@ -31,12 +31,14 @@ from PyQt6.QtWidgets import (
     QApplication,
     QMainWindow,
     QWidget,
+    QDialog,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
     QLCDNumber,
     QStatusBar,
     QMessageBox,
+    QPushButton,
 )
 from PyQt6.QtCore import (
     Qt,
@@ -49,8 +51,6 @@ from PyQt6.QtCore import (
     QPointF,
 )
 from PyQt6.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QLinearGradient, QBrush
-from PyQt6.QtCore import QPoint, QPointF
-from PyQt6.QtMultimedia import QMediaPlayer
 import pyqtgraph as pg
 import av
 
@@ -487,6 +487,104 @@ class SensorWorker(QObject):
         self._stop_event.set()
 
 
+class AlertWindow(QDialog):
+    """Ventana de alerta persistente para temperatura alta."""
+    
+    closed = pyqtSignal()
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Configurar como ventana independiente con atributos especiales
+        self.setWindowTitle("⚠ ALERTA DE TEMPERATURA")
+        self.setGeometry(400, 200, 600, 350)
+        self.setModal(False)  # Non-modal dialog
+        
+        # Configurar flags para asegurar que se muestre como ventana flotante
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #2a1a1a;
+                color: #ffffff;
+                border: 3px solid #ff0000;
+                border-radius: 10px;
+            }
+            QPushButton {
+                background-color: #5f1a1a;
+                color: #ffffff;
+                border: 2px solid #ff0000;
+                padding: 12px;
+                font-size: 14px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #7f2a2a;
+                border: 2px solid #ff6644;
+            }
+            QPushButton:pressed {
+                background-color: #4a1010;
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+        
+        # Título
+        title = QLabel("¡ALERTA DE TEMPERATURA!")
+        title.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+        title.setStyleSheet("color: #ff0000;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        
+        # Valor actual
+        self.temp_label = QLabel("-- °C")
+        self.temp_label.setFont(QFont("Arial", 32, QFont.Weight.Bold))
+        self.temp_label.setStyleSheet("color: #ff6644;")
+        self.temp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.temp_label)
+        
+        # Mensaje
+        self.message_label = QLabel(f"La temperatura ha superado {TEMP_ALERT_THRESHOLD}°C")
+        self.message_label.setFont(QFont("Arial", 12))
+        self.message_label.setStyleSheet("color: #ffaaaa;")
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.message_label)
+        
+        # Tiempo del estado
+        self.time_label = QLabel()
+        self.time_label.setFont(QFont("Arial", 10))
+        self.time_label.setStyleSheet("color: #888888;")
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.time_label)
+        
+        layout.addStretch()
+        
+        # Botón para cerrar
+        close_btn = QPushButton("Cerrar Alerta")
+        close_btn.clicked.connect(self._on_close)
+        layout.addWidget(close_btn)
+    
+    def update_temperature(self, temp: float):
+        """Actualiza el valor de temperatura mostrado."""
+        self.temp_label.setText(f"{temp:.1f} °C")
+        self.time_label.setText(datetime.now().strftime("%H:%M:%S"))
+    
+    def _on_close(self):
+        """Maneja el cierre de la ventana de alerta."""
+        self.closed.emit()
+        self.close()
+    
+    def closeEvent(self, event):
+        """Maneja el cierre de la ventana."""
+        self.closed.emit()
+        event.accept()
+
+
 class MonitorApp(QMainWindow):
     """
     Aplicación principal de monitorización.
@@ -536,6 +634,9 @@ class MonitorApp(QMainWindow):
         self.temp_sum = 0
         self.temp_count = 0
         
+        # Ventana de alerta persistente
+        self.alert_window = None
+        
         # Crear workers y threads
         self.video_worker = VideoWorker()
         self.video_thread = QThread()
@@ -567,6 +668,11 @@ class MonitorApp(QMainWindow):
         self.alert_timer = QTimer()
         self.alert_timer.timeout.connect(self._blink_alert)
         self.alert_blink_state = False
+        
+        # Timer para reproducir sonido continuamente durante la alerta
+        self.sound_timer = QTimer()
+        self.sound_timer.timeout.connect(self._play_continuous_alert_sound)
+        self.sound_timer.setInterval(500)  # Reproducir cada 500ms
         
         # Estados de conexión
         self.video_connected = False
@@ -1097,11 +1203,18 @@ class MonitorApp(QMainWindow):
             self._update_plot()
             
             # Verificar si supera umbral de alerta
-            if temp > TEMP_ALERT_THRESHOLD and not self.alert_timer.isActive():
-                self._trigger_alert()
-            elif temp <= TEMP_ALERT_THRESHOLD:
-                self.alert_timer.stop()
-                self.alert_shown = False
+            logger.info(f"🌡️  Temp: {temp:.1f}°C vs umbral: {TEMP_ALERT_THRESHOLD}°C")
+            if temp > TEMP_ALERT_THRESHOLD:
+                logger.info(f"⚠️  Temperatura SUPERIOR al umbral - llamando _trigger_alert()")
+                if not self.alert_shown:
+                    self._trigger_alert()
+                elif self.alert_window and self.alert_window.isVisible():
+                    # Actualizar temperatura en la ventana existente
+                    self.alert_window.update_temperature(temp)
+            elif temp <= TEMP_ALERT_THRESHOLD and self.alert_shown:
+                # Temperatura volvió a la normalidad, cerrar alerta
+                logger.info(f"✓ Temperatura volvió a la normalidad")
+                self._stop_alert()
         
         except Exception as e:
             logger.error(f"Error procesando datos de sensor: {e}")
@@ -1145,25 +1258,50 @@ class MonitorApp(QMainWindow):
             self.plot_curve.setData(list(self.temp_history))
     
     def _trigger_alert(self):
-        """Dispara alerta de temperatura alta."""
+        """Dispara alerta de temperatura alta con ventana persistente."""
+        logger.info(f"_trigger_alert() called - alert_shown: {self.alert_shown}, temp: {self.current_temp:.1f}°C")
         if not self.alert_shown:
-            QMessageBox.warning(
-                self,
-                "⚠ ALERTA DE TEMPERATURA",
-                f"¡La temperatura ha superado {TEMP_ALERT_THRESHOLD}°C!\n"
-                f"Temperatura actual: {self.current_temp:.1f}°C",
-                QMessageBox.StandardButton.Ok,
-            )
-            self.alert_shown = True
+            try:
+                logger.info("Creando AlertWindow...")
+                # Crear la ventana de alerta sin parent para que sea independiente
+                self.alert_window = AlertWindow()
+                self.alert_window.closed.connect(self._on_alert_closed)
+                logger.info("AlertWindow creada, llamando show()...")
+                self.alert_window.show()
+                self.alert_window.raise_()
+                self.alert_window.activateWindow()
+                self.alert_shown = True
+                logger.info(f"✓ Alerta activada: Temperatura {self.current_temp:.1f}°C")
+                
+                # Iniciar reproducción de sonido continuo
+                self.sound_timer.start()
+            except Exception as e:
+                logger.error(f"Error creando AlertWindow: {e}", exc_info=True)
+                return
         
-        # Reproducir sonido de alerta
-        self._play_alert_sound()
-        
-        # Emitir beep del sistema
-        QApplication.beep()
+        # Actualizar la temperatura en la ventana de alerta
+        if self.alert_window and self.alert_window.isVisible():
+            self.alert_window.update_temperature(self.current_temp)
         
         # Iniciar parpadeo
-        self.alert_timer.start(500)  # Parpadeo cada 500ms
+        if not self.alert_timer.isActive():
+            self.alert_timer.start(500)
+    
+    def _on_alert_closed(self):
+        """Maneja el cierre de la ventana de alerta."""
+        logger.info("Alerta cerrada por el usuario")
+        self._stop_alert()
+    
+    def _stop_alert(self):
+        """Detiene la alerta y cierra la ventana."""
+        if self.alert_window:
+            self.alert_window.close()
+            self.alert_window = None
+        
+        self.alert_timer.stop()
+        self.sound_timer.stop()
+        self.alert_shown = False
+        self.alert_blink_state = False
     
     def _play_alert_sound(self):
         """Reproduce un sonido de alerta."""
@@ -1214,6 +1352,12 @@ class MonitorApp(QMainWindow):
         
         except Exception as e:
             logger.debug(f"Error reproduciendo sonido de alerta: {e}")
+    
+    def _play_continuous_alert_sound(self):
+        """Reproduce sonido de alerta de forma continua durante la alerta."""
+        if self.alert_shown and self.alert_window and self.alert_window.isVisible():
+            self._play_alert_sound()
+            QApplication.beep()
     
     def _blink_alert(self):
         """Anima el parpadeo de alerta."""

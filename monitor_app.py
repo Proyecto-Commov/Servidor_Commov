@@ -636,6 +636,7 @@ class MonitorApp(QMainWindow):
         
         # Ventana de alerta persistente
         self.alert_window = None
+        self.sound_process = None  # Proceso de sonido en loop
         
         # Crear workers y threads
         self.video_worker = VideoWorker()
@@ -670,9 +671,7 @@ class MonitorApp(QMainWindow):
         self.alert_blink_state = False
         
         # Timer para reproducir sonido continuamente durante la alerta
-        self.sound_timer = QTimer()
-        self.sound_timer.timeout.connect(self._play_continuous_alert_sound)
-        self.sound_timer.setInterval(500)  # Reproducir cada 500ms
+        # (Ya no se usa - el sonido ahora se maneja como un proceso en loop)
         
         # Estados de conexión
         self.video_connected = False
@@ -1273,8 +1272,8 @@ class MonitorApp(QMainWindow):
                 self.alert_shown = True
                 logger.info(f"✓ Alerta activada: Temperatura {self.current_temp:.1f}°C")
                 
-                # Iniciar reproducción de sonido continuo
-                self.sound_timer.start()
+                # Iniciar reproducción de sonido continuo en loop
+                self._start_looping_alert_sound()
             except Exception as e:
                 logger.error(f"Error creando AlertWindow: {e}", exc_info=True)
                 return
@@ -1299,13 +1298,16 @@ class MonitorApp(QMainWindow):
             self.alert_window = None
         
         self.alert_timer.stop()
-        self.sound_timer.stop()
+        self._stop_looping_alert_sound()  # Detener el sonido en loop
         self.alert_shown = False
         self.alert_blink_state = False
     
-    def _play_alert_sound(self):
-        """Reproduce un sonido de alerta."""
+    def _start_looping_alert_sound(self):
+        """Inicia reproducción de sonido de alerta en loop."""
         try:
+            # Si ya hay un proceso de sonido, detenerlo primero
+            self._stop_looping_alert_sound()
+            
             # Intentar usar paplay (PulseAudio)
             sound_files = [
                 "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga",
@@ -1321,43 +1323,59 @@ class MonitorApp(QMainWindow):
                     break
             
             if sound_file:
-                # Intentar reproducir con paplay
+                # Intentar reproducir en loop con paplay
                 try:
-                    subprocess.Popen(
+                    self.sound_process = subprocess.Popen(
                         ["paplay", sound_file],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
+                    logger.info(f"🔊 Sonido de alerta iniciado (paplay, PID: {self.sound_process.pid})")
+                    return
                 except FileNotFoundError:
-                    # Si paplay no está disponible, intentar con aplay
-                    try:
-                        subprocess.Popen(
-                            ["aplay", sound_file],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                    except FileNotFoundError:
-                        logger.debug("No audio player found (paplay/aplay)")
-            else:
-                # Generar beep programático si no hay archivos de sonido
+                    pass
+                
+                # Si paplay no está disponible, intentar con aplay (con loop)
                 try:
-                    # Usar beep del sistema
-                    subprocess.Popen(
-                        ["beep", "-f", "1000", "-l", "200"],
+                    self.sound_process = subprocess.Popen(
+                        ["aplay", "-l", sound_file],  # -l para loop infinito
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
+                    logger.info(f"🔊 Sonido de alerta iniciado (aplay -l, PID: {self.sound_process.pid})")
+                    return
                 except FileNotFoundError:
-                    logger.debug("beep command not found")
+                    logger.debug("No audio player found (paplay/aplay)")
+            
+            # Generar beep programático si no hay archivos de sonido
+            logger.info("🔊 Usando beep del sistema para alerta")
+            try:
+                self.sound_process = subprocess.Popen(
+                    ["bash", "-c", "while true; do beep -f 1000 -l 200; sleep 0.2; done"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                logger.info(f"🔊 Beep loop iniciado (PID: {self.sound_process.pid})")
+            except FileNotFoundError:
+                logger.debug("beep command not found")
         
         except Exception as e:
-            logger.debug(f"Error reproduciendo sonido de alerta: {e}")
+            logger.error(f"Error iniciando sonido de alerta en loop: {e}", exc_info=True)
     
-    def _play_continuous_alert_sound(self):
-        """Reproduce sonido de alerta de forma continua durante la alerta."""
-        if self.alert_shown and self.alert_window and self.alert_window.isVisible():
-            self._play_alert_sound()
-            QApplication.beep()
+    def _stop_looping_alert_sound(self):
+        """Detiene la reproducción de sonido de alerta en loop."""
+        if self.sound_process:
+            try:
+                self.sound_process.terminate()  # Señal SIGTERM
+                try:
+                    self.sound_process.wait(timeout=2)  # Esperar a que termine
+                except subprocess.TimeoutExpired:
+                    self.sound_process.kill()  # Si no termina, SIGKILL
+                logger.info("🔇 Sonido de alerta detenido")
+            except Exception as e:
+                logger.debug(f"Error deteniendo sonido: {e}")
+            finally:
+                self.sound_process = None
     
     def _blink_alert(self):
         """Anima el parpadeo de alerta."""

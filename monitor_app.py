@@ -22,6 +22,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -639,6 +640,13 @@ class MonitorApp(QMainWindow):
         self.alert_window = None
         self.sound_process = None  # Proceso de sonido en loop
         
+        # Modo de operación: True (Real) o False (Fake)
+        self.fake_mode = False
+        self.fake_target_temp = None  # Temperatura objetivo en modo Fake
+        self.fake_drift_counter = 0    # Contador de samples para drift
+        self.fake_drift_samples = 5    # Muestras para completar el drift
+        self.fake_base_temp = 25.0     # Temperatura actual en Fake mode
+        
         # Crear workers y threads
         self.video_worker = VideoWorker()
         self.video_thread = QThread()
@@ -673,6 +681,11 @@ class MonitorApp(QMainWindow):
         
         # Timer para reproducir sonido continuamente durante la alerta
         # (Ya no se usa - el sonido ahora se maneja como un proceso en loop)
+        
+        # Timer para generar temperaturas falsas en modo Fake
+        self.fake_temp_timer = QTimer()
+        self.fake_temp_timer.timeout.connect(self._generate_fake_temperature)
+        self.fake_temp_timer.setInterval(2000)  # Cada 2 segundos
         
         # Estados de conexión
         self.video_connected = False
@@ -732,6 +745,20 @@ class MonitorApp(QMainWindow):
             border: 1px solid #0066cc;
         """)
         header_layout.addWidget(self.camera_badge)
+        
+        header_layout.addSpacing(10)
+        
+        # Mode badge (REAL/FAKE)
+        self.mode_badge = QLabel("◆ REAL MODE")
+        self.mode_badge.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+        self.mode_badge.setStyleSheet("""
+            color: #ffffff;
+            background-color: #1a5f1a;
+            padding: 4px 8px;
+            border-radius: 12px;
+            border: 1px solid #00ff00;
+        """)
+        header_layout.addWidget(self.mode_badge)
         
         header_layout.addStretch()
         
@@ -1067,6 +1094,90 @@ class MonitorApp(QMainWindow):
         now = datetime.now()
         self.time_label.setText(now.strftime("%H:%M:%S"))
         self.timestamp_label.setText(now.strftime("%H:%M:%S · %a %d %b %Y"))
+    
+    def keyPressEvent(self, event):
+        """Maneja entrada de teclado para cambiar modo y controlar temperatura Fake."""
+        key = event.text().lower()
+        
+        # Cambiar a modo Fake
+        if key == 'f' and not self.fake_mode:
+            self.fake_mode = True
+            self.fake_base_temp = self.current_temp  # Iniciar con la temp actual
+            self.fake_target_temp = None
+            self.fake_drift_counter = 0
+            self.fake_temp_timer.start()
+            self.sensor_worker.stop()  # Detener el worker real
+            
+            # Actualizar UI
+            self.mode_badge.setText("◆ FAKE MODE")
+            self.mode_badge.setStyleSheet("""
+                color: #ffffff;
+                background-color: #5f4a1a;
+                padding: 4px 8px;
+                border-radius: 12px;
+                border: 1px solid #ff8800;
+            """)
+            logger.info("🔄 Cambiando a modo FAKE - temperaturas simuladas")
+            return
+        
+        # Controlar temperatura objetivo en modo Fake (1-9)
+        if self.fake_mode and key in '123456789':
+            target_value = int(key) * 10  # 1→10, 2→20, ..., 9→90
+            self.fake_target_temp = float(target_value)
+            self.fake_drift_counter = 0
+            logger.info(f"📊 Modo FAKE: Drift iniciado hacia {self.fake_target_temp}°C")
+            return
+        
+        super().keyPressEvent(event)
+    
+    def _generate_fake_temperature(self):
+        """Genera temperatura falsa con oscilación y drift."""
+        import random
+        
+        # Si hay un target de drift, interpolar hacia él
+        if self.fake_target_temp is not None and self.fake_drift_counter < self.fake_drift_samples:
+            # Calcular incremento por sample: (target - base) / 5
+            increment = (self.fake_target_temp - self.fake_base_temp) / self.fake_drift_samples
+            self.fake_base_temp += increment
+            self.fake_drift_counter += 1
+            
+            if self.fake_drift_counter >= self.fake_drift_samples:
+                # Asegurar que llegamos exactamente al target
+                self.fake_base_temp = self.fake_target_temp
+                logger.info(f"✓ Drift completado: temperatura ahora oscila en {self.fake_target_temp}°C")
+                self.fake_target_temp = None  # Completar drift
+        
+        # Agregar oscilación aleatoria (±2°C)
+        oscillation = random.uniform(-2.0, 2.0)
+        fake_temp = self.fake_base_temp + oscillation
+        
+        # Clasificar temperatura
+        classification = self._classify_temperature(fake_temp)
+        
+        # Simular datos de sensor
+        fake_data = {
+            'timestamp': time.time(),
+            'temperature': fake_temp,
+            'classification': classification
+        }
+        
+        # Procesar como si viniera del sensor
+        self._on_sensor_data(fake_data)
+    
+    def _classify_temperature(self, temp: float) -> str:
+        """Clasifica temperatura en categorías."""
+        if temp < 10:
+            return "frio"
+        elif temp < 20:
+            return "frio"
+        elif temp < 30:
+            return "templado"
+        elif temp < 50:
+            return "caliente"
+        elif temp < 70:
+            return "muy caliente"
+        else:
+            return "crítico"
     
     @pyqtSlot(QImage)
     def _on_frame_ready(self, q_image: QImage):

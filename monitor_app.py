@@ -19,6 +19,7 @@ import json
 import logging
 import sys
 import os
+import signal
 import subprocess
 import threading
 from collections import deque
@@ -1329,6 +1330,7 @@ class MonitorApp(QMainWindow):
                         ["bash", "-c", f"while true; do paplay {sound_file}; done"],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
+                        preexec_fn=os.setsid,  # Crear nuevo group de procesos
                     )
                     logger.info(f"🔊 Sonido de alerta iniciado (paplay loop, PID: {self.sound_process.pid})")
                     return
@@ -1341,6 +1343,7 @@ class MonitorApp(QMainWindow):
                         ["bash", "-c", f"while true; do aplay {sound_file}; done"],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
+                        preexec_fn=os.setsid,  # Crear nuevo group de procesos
                     )
                     logger.info(f"🔊 Sonido de alerta iniciado (aplay loop, PID: {self.sound_process.pid})")
                     return
@@ -1354,6 +1357,7 @@ class MonitorApp(QMainWindow):
                     ["bash", "-c", "while true; do beep -f 1000 -l 200; sleep 0.2; done"],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    preexec_fn=os.setsid,  # Crear nuevo group de procesos
                 )
                 logger.info(f"🔊 Beep loop iniciado (PID: {self.sound_process.pid})")
             except FileNotFoundError:
@@ -1366,11 +1370,22 @@ class MonitorApp(QMainWindow):
         """Detiene la reproducción de sonido de alerta en loop."""
         if self.sound_process:
             try:
-                self.sound_process.terminate()  # Señal SIGTERM
+                # Matar el grupo de procesos completo (bash + paplay/aplay/beep)
                 try:
-                    self.sound_process.wait(timeout=2)  # Esperar a que termine
+                    os.killpg(os.getpgid(self.sound_process.pid), signal.SIGTERM)
+                except OSError:
+                    # Si el proceso ya terminó, ignorar el error
+                    pass
+                
+                try:
+                    self.sound_process.wait(timeout=1)  # Esperar a que termine
                 except subprocess.TimeoutExpired:
-                    self.sound_process.kill()  # Si no termina, SIGKILL
+                    # Si no termina, forzar SIGKILL
+                    try:
+                        os.killpg(os.getpgid(self.sound_process.pid), signal.SIGKILL)
+                    except OSError:
+                        pass
+                    self.sound_process.wait()
                 logger.info("🔇 Sonido de alerta detenido")
             except Exception as e:
                 logger.debug(f"Error deteniendo sonido: {e}")
@@ -1400,6 +1415,9 @@ class MonitorApp(QMainWindow):
     def closeEvent(self, event):
         """Maneja el cierre de la aplicación."""
         logger.info("Cerrando aplicación...")
+        
+        # Detener sonido de alerta
+        self._stop_looping_alert_sound()
         
         # Detener workers
         self.video_worker.stop()

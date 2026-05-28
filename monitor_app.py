@@ -748,18 +748,6 @@ class MonitorApp(QMainWindow):
         
         header_layout.addSpacing(10)
         
-        # Mode badge (REAL/FAKE)
-        self.mode_badge = QLabel("◆ REAL MODE")
-        self.mode_badge.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-        self.mode_badge.setStyleSheet("""
-            color: #ffffff;
-            background-color: #1a5f1a;
-            padding: 4px 8px;
-            border-radius: 12px;
-            border: 1px solid #00ff00;
-        """)
-        header_layout.addWidget(self.mode_badge)
-        
         header_layout.addStretch()
         
         # Mostrar SERVIDOR_COMANOV
@@ -1109,14 +1097,6 @@ class MonitorApp(QMainWindow):
             self.sensor_worker.stop()  # Detener el worker real
             
             # Actualizar UI
-            self.mode_badge.setText("◆ FAKE MODE")
-            self.mode_badge.setStyleSheet("""
-                color: #ffffff;
-                background-color: #5f4a1a;
-                padding: 4px 8px;
-                border-radius: 12px;
-                border: 1px solid #ff8800;
-            """)
             logger.info("🔄 Cambiando a modo FAKE - temperaturas simuladas")
             return
         

@@ -23,6 +23,7 @@ import signal
 import subprocess
 import threading
 import time
+import struct
 from collections import deque
 from pathlib import Path
 from typing import Optional
@@ -65,7 +66,7 @@ VIDEO_PORT              = 9000
 VIDEO_RECONNECT_DELAY   = 3              # segundos entre reintentos
 
 # Conexión sensor (Proceso 2 — externo)
-SENSOR_HOST             = "127.0.0.1"
+SENSOR_HOST             = "0.0.0.0"
 SENSOR_PORT             = 9001
 SENSOR_RECONNECT_DELAY  = 3
 
@@ -444,45 +445,72 @@ class SensorWorker(QObject):
             self._stop_event.wait(SENSOR_RECONNECT_DELAY)
     
     def _connect_and_read(self):
-        """Conecta al servidor de sensor y lee datos."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5)
+        """Escucha en puerto para conexiones de sensor externo."""
+        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
+        # Configurar socket para permitir reutilización inmediata del puerto
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        # SO_LINGER con 0 timeout para cerrar sin TIME_WAIT
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+        
+        if hasattr(socket, 'SO_REUSEPORT'):
+            server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         
         try:
-            logger.info(f"Conectando al sensor {SENSOR_HOST}:{SENSOR_PORT}...")
-            sock.connect((SENSOR_HOST, SENSOR_PORT))
-            self.is_connected = True
-            self.connection_status.emit(True)
-            logger.info("Conectado al sensor ✓")
+            logger.info(f"Escuchando en 0.0.0.0:{SENSOR_PORT} para conexiones del sensor...")
+            server_sock.bind(("0.0.0.0", SENSOR_PORT))
+            server_sock.listen(1)
+            logger.info(f"Servidor de sensor escuchando en puerto {SENSOR_PORT} ✓")
             
-            # Leer líneas JSON-lines
-            sock_file = sock.makefile("r", buffering=1)
-            for line in sock_file:
-                if self._stop_event.is_set():
-                    break
+            # Esperar conexión (con timeout para permitir stop)
+            server_sock.settimeout(2)
+            
+            try:
+                client_sock, client_addr = server_sock.accept()
+                logger.info(f"Sensor conectado desde {client_addr} ✓")
+                self.is_connected = True
+                self.connection_status.emit(True)
                 
-                line = line.strip()
-                if not line:
-                    continue
+                # Leer líneas JSON-lines del sensor
+                client_sock.settimeout(5)
+                sock_file = client_sock.makefile("r", buffering=1)
                 
-                try:
-                    data = json.loads(line)
-                    # Validar campos esperados
-                    if "temperature" in data and "classification" in data:
-                        self.data_ready.emit(data)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"JSON inválido del sensor: {e}")
+                for line in sock_file:
+                    if self._stop_event.is_set():
+                        break
+                    
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    try:
+                        data = json.loads(line)
+                        # Validar campos esperados
+                        if "temperature" in data and "classification" in data:
+                            logger.debug(f"Datos recibidos del sensor: {data}")
+                            self.data_ready.emit(data)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"JSON inválido del sensor: {e}")
+                
+                client_sock.close()
+                logger.info("Conexión del sensor cerrada")
+            
+            except socket.timeout:
+                # Timeout normal, volver a intentar
+                pass
+            except Exception as e:
+                logger.error(f"Error aceptando conexión del sensor: {e}")
         
-        except socket.timeout:
-            logger.warning("Timeout conectando al sensor")
-        except ConnectionRefusedError:
-            logger.warning("Sensor no disponible (conexión rechazada)")
-        except Exception as e:
-            logger.error(f"Error leyendo sensor: {e}")
+        except OSError as e:
+            logger.error(f"Error en servidor de sensor (errno {e.errno}): {e}")
         finally:
             self.is_connected = False
             self.connection_status.emit(False)
-            sock.close()
+            try:
+                server_sock.close()
+            except:
+                pass
     
     def stop(self):
         """Detener el worker."""

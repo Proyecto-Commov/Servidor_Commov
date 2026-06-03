@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
 monitor_app.py — Proceso 3: Aplicación cliente de monitorización en tiempo real
-
+ 
 Responsabilidad:
 - Interfaz gráfica con PyQt6 (QMainWindow)
 - Consumir stream de vídeo del Proceso 1 (video_server.py)
 - Consumir datos de temperatura del Proceso 2 (sensor externo o temp_simulator.py)
 - Mostrar vídeo, temperatura actual, clasificación, gráfico histórico, alertas
-
+ 
 Arquitectura:
 - QThread #1: VideoWorker — decodifica y emite frames
 - QThread #2: SensorWorker — lee datos JSON de temperatura
 - Hilo principal: Qt event loop con UI responsiva
 """
-
+ 
 import socket
 import json
 import logging
@@ -27,7 +27,7 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
-
+ 
 import numpy as np
 from PyQt6.QtWidgets import (
     QApplication,
@@ -55,7 +55,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QImage, QPixmap, QFont, QColor, QPainter, QLinearGradient, QBrush
 import pyqtgraph as pg
 import av
-
+ 
 # =============================================================================
 # CONFIGURACIÓN — modifica estos valores según tu entorno
 # =============================================================================
@@ -63,20 +63,20 @@ import av
 VIDEO_HOST              = "127.0.0.1"
 VIDEO_PORT              = 9000
 VIDEO_RECONNECT_DELAY   = 3              # segundos entre reintentos
-
+ 
 # Conexión sensor (Proceso 2 — externo)
 SENSOR_HOST             = "127.0.0.1"
 SENSOR_PORT             = 9001
 SENSOR_RECONNECT_DELAY  = 3
-
+ 
 # UI — panel de vídeo
 VIDEO_DISPLAY_WIDTH     = 800            # píxeles de ancho del panel de vídeo
 VIDEO_DISPLAY_HEIGHT    = 450            # píxeles de alto del panel de vídeo
-
+ 
 # UI — gráfico de temperatura
 TEMP_HISTORY_SIZE       = 60            # número de muestras en el gráfico
 TEMP_ALERT_THRESHOLD    = 60.0          # °C — umbral de alerta
-
+ 
 # Clasificaciones y sus colores (fondo del panel de clasificación)
 CLASSIFICATION_COLORS = {
     "frio":           "#4A90D9",   # Azul
@@ -85,18 +85,18 @@ CLASSIFICATION_COLORS = {
     "muy caliente":   "#D95B3A",   # Rojo naranja
     "crítico":        "#C0392B",   # Rojo oscuro
 }
-
+ 
 LOG_LEVEL           = "INFO"            # Nivel de log: DEBUG, INFO, WARNING
 # =============================================================================
-
+ 
 # Configurar logging
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=getattr(logging, LOG_LEVEL),
 )
 logger = logging.getLogger(__name__)
-
-
+ 
+ 
 class VideoWorker(QObject):
     """
     Worker que corre en QThread separado.
@@ -208,6 +208,9 @@ class VideoWorker(QObject):
                         # Convertir a numpy array RGB
                         np_frame = frame.to_ndarray(format="rgb24")
                         
+                        # Flip upside down
+                        np_frame = np.flipud(np_frame)
+                        
                         # Convertir numpy array a QImage
                         height, width, _ = np_frame.shape
                         bytes_per_line = 3 * width
@@ -318,6 +321,9 @@ class VideoWorker(QObject):
                         # Convertir a numpy array RGB
                         np_frame = frame.to_ndarray(format="rgb24")
                         
+                        # Flip upside down
+                        np_frame = np.flipud(np_frame)
+                        
                         # Convertir numpy array a QImage
                         height, width, _ = np_frame.shape
                         bytes_per_line = 3 * width
@@ -359,8 +365,8 @@ class VideoWorker(QObject):
     def stop(self):
         """Detener el worker."""
         self._stop_event.set()
-
-
+ 
+ 
 class _SocketReader:
     """Adaptador para que PyAV lea desde un socket como si fuera un archivo."""
     
@@ -402,8 +408,8 @@ class _SocketReader:
     def tell(self) -> int:
         """Retorna posición (no aplicable para sockets)."""
         return 0
-
-
+ 
+ 
 class SensorWorker(QObject):
     """
     Worker que corre en QThread separado.
@@ -487,25 +493,31 @@ class SensorWorker(QObject):
     def stop(self):
         """Detener el worker."""
         self._stop_event.set()
-
-
+ 
+ 
 class AlertWindow(QDialog):
     """Ventana de alerta persistente para temperatura alta."""
     
     closed = pyqtSignal()
     
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, main_window=None):
+        super().__init__(parent=None)
+        self.main_window = main_window
         # Configurar como ventana independiente con atributos especiales
         self.setWindowTitle("⚠ ALERTA DE TEMPERATURA")
-        self.setGeometry(400, 200, 600, 350)
+        self.setGeometry(10, 10, 600, 350)
         self.setModal(False)  # Non-modal dialog
         
         # Configurar flags para asegurar que se muestre como ventana flotante
         self.setWindowFlags(
             Qt.WindowType.Window |
-            Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.FramelessWindowHint
         )
+        
+        # Prevent the alert window from taking focus - most important!
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         
         self.setStyleSheet("""
             QWidget {
@@ -568,6 +580,7 @@ class AlertWindow(QDialog):
         
         # Botón para cerrar
         close_btn = QPushButton("Cerrar Alerta")
+        close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent button from taking focus
         close_btn.clicked.connect(self._on_close)
         layout.addWidget(close_btn)
     
@@ -581,12 +594,20 @@ class AlertWindow(QDialog):
         self.closed.emit()
         self.close()
     
+    def showEvent(self, event):
+        """Ensure window doesn't take focus when shown."""
+        super().showEvent(event)
+        # Force focus back to main window
+        if self.main_window:
+            self.main_window.activateWindow()
+            self.main_window.setFocus()
+    
     def closeEvent(self, event):
         """Maneja el cierre de la ventana."""
         self.closed.emit()
         event.accept()
-
-
+ 
+ 
 class MonitorApp(QMainWindow):
     """
     Aplicación principal de monitorización.
@@ -944,7 +965,7 @@ class MonitorApp(QMainWindow):
         
         # Gráfico con pyqtgraph
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setLabel("bottom", "ÚLTIMAS 48 MUESTRAS", color="#888888")
+        self.plot_widget.setLabel("bottom", "ÚLTIMAS 60 MUESTRAS", color="#888888")
         self.plot_widget.setLabel("left", "°C", color="#888888")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.2)
         self.plot_widget.setStyleSheet("""
@@ -955,8 +976,9 @@ class MonitorApp(QMainWindow):
             }
         """)
         
-        # Curve azul
-        self.plot_curve = self.plot_widget.plot(pen=pg.mkPen("#0088ff", width=2))
+        # Curve with gradient colors based on temperature
+        self.plot_widget.clear()
+        self.plot_curves = []  # Store multiple curves for gradient colors
         right_panel.addWidget(self.plot_widget, 1)
         
         # ===== ESCALA TÉRMICA =====
@@ -967,15 +989,15 @@ class MonitorApp(QMainWindow):
         
         # Barra de gradiente
         self.thermal_bar = QLabel()
-        self.thermal_bar.setFixedHeight(15)
+        self.thermal_bar.setFixedHeight(20)
         self.thermal_bar.setPixmap(self._create_thermal_scale())
         right_panel.addWidget(self.thermal_bar)
         
         # Rango de temperatura
         range_layout = QHBoxLayout()
-        range_layout.addWidget(QLabel("0 °C"), 0)
+        range_layout.addWidget(QLabel("10 °C"), 0)
         range_layout.addStretch()
-        range_layout.addWidget(QLabel("50 °C"), 0)
+        range_layout.addWidget(QLabel("90 °C"), 0)
         right_panel.addLayout(range_layout)
         
         content_layout.addLayout(right_panel, 1)
@@ -1066,14 +1088,6 @@ class MonitorApp(QMainWindow):
         brush = QBrush(gradient)
         painter.fillRect(0, 0, 1200, 20, brush)
         
-        # Dibujar líneas de referencia
-        painter.setPen(QColor(200, 200, 200))
-        painter.setFont(QFont("Arial", 8))
-        
-        # Marcas cada 200 píxeles
-        for i in range(0, 1201, 200):
-            painter.drawLine(i, 0, i, 3)
-        
         painter.end()
         return pixmap
     
@@ -1094,7 +1108,17 @@ class MonitorApp(QMainWindow):
             self.fake_target_temp = None
             self.fake_drift_counter = 0
             self.fake_temp_timer.start()
+            
+            # Desconectar señales del sensor real antes de detenerlo
+            try:
+                self.sensor_worker.connection_status.disconnect(self._on_sensor_status)
+            except:
+                pass
+            
             self.sensor_worker.stop()  # Detener el worker real
+            
+            # Mostrar sensor como conectado en modo Fake
+            self._on_sensor_status(True)
             
             # Actualizar UI
             logger.info("🔄 Cambiando a modo FAKE - temperaturas simuladas")
@@ -1179,6 +1203,32 @@ class MonitorApp(QMainWindow):
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
+ 
+        # ── Temperature overlay ──────────────────────────────────────────────
+        # Draw a semi-transparent rectangle over the centre of the frame when
+        # the temperature is outside the [20 °C, 50 °C] comfort range.
+        overlay_color: Optional[QColor] = None
+        if self.current_temp < 20.0:
+            overlay_color = QColor(0, 80, 255, 100)    # Blue, ~40 % opacity
+        elif self.current_temp > 50.0:
+            overlay_color = QColor(220, 30, 30, 100)   # Red,  ~40 % opacity
+ 
+        if overlay_color is not None:
+            # Make a mutable copy so we don't paint over the cached pixmap
+            scaled_pixmap = scaled_pixmap.copy()
+            pw, ph = scaled_pixmap.width(), scaled_pixmap.height()
+            # Rectangle covers the central 50 % of width and height
+            rect_w = pw // 3
+            rect_h = ph // 2
+            rect_x = (pw - rect_w) // 2
+            rect_y = (ph - rect_h) // 2
+ 
+            painter = QPainter(scaled_pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.fillRect(rect_x, rect_y, rect_w, rect_h, overlay_color)
+            painter.end()
+        # ── End overlay ──────────────────────────────────────────────────────
+ 
         self.video_label.setPixmap(scaled_pixmap)
     
     @pyqtSlot(bool)
@@ -1344,9 +1394,74 @@ class MonitorApp(QMainWindow):
             """)
     
     def _update_plot(self):
-        """Actualiza el gráfico de temperatura con historial."""
-        if len(self.temp_history) > 0:
-            self.plot_curve.setData(list(self.temp_history))
+        """Actualiza el gráfico de temperatura con historial y colores de gradiente."""
+        if len(self.temp_history) < 2:
+            if len(self.temp_history) == 1:
+                # Si solo hay un punto, dibujarlo sin línea
+                self.plot_widget.clear()
+                scatter = pg.ScatterPlotItem([0], list(self.temp_history), 
+                                            pen=pg.mkPen(None),
+                                            brush=pg.mkBrush(self._temp_to_color(list(self.temp_history)[0])),
+                                            size=5)
+                self.plot_widget.addItem(scatter)
+            return
+        
+        # Limpiar curvas anteriores
+        self.plot_widget.clear()
+        
+        temps = list(self.temp_history)
+        
+        # Dibujar líneas con colores que corresponden a la temperatura
+        for i in range(len(temps) - 1):
+            # Usar el promedio de temperatura entre los dos puntos para el color
+            avg_temp = (temps[i] + temps[i + 1]) / 2
+            color = self._temp_to_color(avg_temp)
+            
+            # Usar el color promedio para el segmento
+            pen = pg.mkPen(color, width=2)
+            curve = self.plot_widget.plot([i, i+1], [temps[i], temps[i+1]], pen=pen)
+    
+    def _temp_to_color(self, temp: float) -> tuple:
+        """Convierte temperatura (10-90°C) a color RGB del gradiente térmico."""
+        # Mapear 10-90°C a 0.0-1.0
+        min_temp = 10.0
+        max_temp = 90.0
+        normalized = (temp - min_temp) / (max_temp - min_temp)
+        normalized = max(0.0, min(1.0, normalized))  # Clamp a [0, 1]
+        
+        # Definir stops del gradiente con más colores para transición suave
+        color_stops = [
+            (0.00, (0, 0, 255)),           # Azul
+            (0.11, (0, 128, 255)),         # Azul-Cyan
+            (0.22, (0, 255, 255)),         # Cyan
+            (0.33, (0, 255, 0)),           # Verde
+            (0.44, (128, 255, 0)),         # Verde-Amarillo
+            (0.56, (255, 255, 0)),         # Amarillo
+            (0.67, (255, 165, 0)),         # Naranja
+            (0.78, (255, 100, 0)),         # Naranja-Rojo
+            (0.89, (255, 50, 0)),          # Rojo-Naranja
+            (1.00, (255, 0, 0)),           # Rojo
+        ]
+        
+        # Encontrar los dos stops más cercanos
+        for i in range(len(color_stops) - 1):
+            if normalized >= color_stops[i][0] and normalized <= color_stops[i + 1][0]:
+                # Interpolar entre estos dos stops
+                stop1_pos, color1 = color_stops[i]
+                stop2_pos, color2 = color_stops[i + 1]
+                
+                # Calcular posición relativa entre los dos stops
+                t = (normalized - stop1_pos) / (stop2_pos - stop1_pos)
+                
+                # Interpolar RGB
+                r = int(color1[0] + (color2[0] - color1[0]) * t)
+                g = int(color1[1] + (color2[1] - color1[1]) * t)
+                b = int(color1[2] + (color2[2] - color1[2]) * t)
+                
+                return (r, g, b)
+        
+        # Por si acaso (debería retornar Rojo en el extremo)
+        return (255, 0, 0)
     
     def _trigger_alert(self):
         """Dispara alerta de temperatura alta con ventana persistente."""
@@ -1354,13 +1469,12 @@ class MonitorApp(QMainWindow):
         if not self.alert_shown:
             try:
                 logger.info("Creando AlertWindow...")
-                # Crear la ventana de alerta sin parent para que sea independiente
-                self.alert_window = AlertWindow()
+                # Crear la ventana de alerta pasando la ventana principal como referencia
+                self.alert_window = AlertWindow(main_window=self)
                 self.alert_window.closed.connect(self._on_alert_closed)
                 logger.info("AlertWindow creada, llamando show()...")
                 self.alert_window.show()
                 self.alert_window.raise_()
-                self.alert_window.activateWindow()
                 self.alert_shown = True
                 logger.info(f"✓ Alerta activada: Temperatura {self.current_temp:.1f}°C")
                 
@@ -1522,8 +1636,8 @@ class MonitorApp(QMainWindow):
         
         logger.info("Aplicación cerrada")
         event.accept()
-
-
+ 
+ 
 def main():
     """Punto de entrada de la aplicación."""
     app = QApplication(sys.argv)
@@ -1537,7 +1651,7 @@ def main():
     
     logger.info("Aplicación iniciada ✓")
     sys.exit(app.exec())
-
-
+ 
+ 
 if __name__ == "__main__":
     main()

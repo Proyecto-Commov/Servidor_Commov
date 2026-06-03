@@ -11,7 +11,7 @@ EMISIÓN:
 - Actúa como servidor TCP escuchando en SENSOR_HOST:SENSOR_PORT
 - Emite un objeto JSON por línea (JSON-lines format)
 - Cada mensaje contiene: timestamp, temperature, classification
-- Frecuencia: aproximadamente 1 mensaje por segundo
+- Frecuencia: 1 mensaje cada 2 segundos
 
 TODO: Implementar en fase posterior
 - Conectar con datos de sensor real
@@ -35,8 +35,8 @@ from typing import Generator
 # =============================================================================
 SENSOR_BIND_HOST     = "0.0.0.0"        # Interfaz de escucha
 SENSOR_PORT          = 9001              # Puerto TCP del servidor
-SENSOR_INTERVAL      = 1.0               # Segundos entre emisiones de datos
-SENSOR_TEMP_BASE     = 65.0              # Temperatura base (°C) — alta para pruebas de alerta
+SENSOR_INTERVAL      = 2.0               # Segundos entre emisiones de datos
+SENSOR_TEMP_BASE     = 45.0              # Temperatura base (°C) — alta para pruebas de alerta
 SENSOR_TEMP_NOISE    = 5.0               # Variación aleatoria (±)
 LOG_LEVEL            = "INFO"            # Nivel de log
 # =============================================================================

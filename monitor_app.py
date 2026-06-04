@@ -1218,10 +1218,10 @@ class MonitorApp(QMainWindow):
             scaled_pixmap = scaled_pixmap.copy()
             pw, ph = scaled_pixmap.width(), scaled_pixmap.height()
             # Rectangle covers the central 50 % of width and height
-            rect_w = pw // 3
-            rect_h = ph // 2
-            rect_x = (pw - rect_w) // 2
-            rect_y = (ph - rect_h) // 2
+            rect_w = pw // 5
+            rect_h = ph // 3
+            rect_x = (pw - rect_w) // 11 * 5
+            rect_y = (ph - rect_h) // 3
  
             painter = QPainter(scaled_pixmap)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)

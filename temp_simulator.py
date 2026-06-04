@@ -36,7 +36,7 @@ from typing import Generator
 SENSOR_BIND_HOST     = "0.0.0.0"        # Interfaz de escucha
 SENSOR_PORT          = 9001              # Puerto TCP del servidor
 SENSOR_INTERVAL      = 2.0               # Segundos entre emisiones de datos
-SENSOR_TEMP_BASE     = 45.0              # Temperatura base (°C) — alta para pruebas de alerta
+SENSOR_TEMP_BASE     = 30.0              # Temperatura base (°C) — alta para pruebas de alerta
 SENSOR_TEMP_NOISE    = 5.0               # Variación aleatoria (±)
 LOG_LEVEL            = "INFO"            # Nivel de log
 # =============================================================================
@@ -118,7 +118,7 @@ def generate_temperature_data() -> Generator[dict, None, None]:
     
     while True:
         # Simular deriva aleatoria de temperatura (paseo aleatorio)
-        drift = random.uniform(-5, 7)
+        drift = random.uniform(-5, 5)
         current_temp += drift
         
         # Agregar ruido aleatorio

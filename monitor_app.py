@@ -1206,9 +1206,9 @@ class MonitorApp(QMainWindow):
  
         # ── Temperature overlay ──────────────────────────────────────────────
         # Draw a semi-transparent rectangle over the centre of the frame when
-        # the temperature is outside the [20 °C, 50 °C] comfort range.
+        # the temperature is outside the [25 °C, 50 °C] comfort range.
         overlay_color: Optional[QColor] = None
-        if self.current_temp < 20.0:
+        if self.current_temp < 25.0:
             overlay_color = QColor(0, 80, 255, 100)    # Blue, ~40 % opacity
         elif self.current_temp > 50.0:
             overlay_color = QColor(220, 30, 30, 100)   # Red,  ~40 % opacity
